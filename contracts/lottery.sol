@@ -1,5 +1,8 @@
 // SPDX-License-Identifier:MIT
 pragma solidity ^0.8.7;
+//import
+import {VRFCoordinatorV2Interface} from "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
+import {VRFConsumerBaseV2} from "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
 error lottery__NotEnoughEth();
 error Lottery_TransferFailed();
 error lottery__notOpen();
@@ -11,12 +14,11 @@ error lottery__notOwner();
 /**
  * @title a sample lottery contract
  * @author helloiampratyush
- * @notice this contract is for creating  untamperable decentralized smart contract
+ * @notice this contract is for creating  untamperable decentralized lottery smart contract
  */
 
-//one of the player should be paid
 
-contract RandomLottery {
+contract RandomLottery is VRFConsumerBaseV2{
     address private randomAddress;
     enum lotteryState {
         OPEN,
@@ -38,45 +40,74 @@ contract RandomLottery {
 
     // uint256 0=OPEN,uint256 1=CALCULATING
     //state variable
-    uint256 private lotteryCounter=1;
-    uint256 private lotteryCompletionOwnerTime=0;
+    uint256 public lotteryCounter=1;
+    uint256 public lotteryCompletionOwnerTime=0;
  
     //lottery variable
     address payable i_owner;
-    address private s_recentWinner;
    //mapping (uint256=>uint256) private WinnerIndex;
-   mapping(uint256=>lotteryThings) private lotteryMap;
-   mapping(uint256=>address payable[] ) private  s_players;
-   mapping(address=>uint256) private tokenBalance;
-   mapping(address=>login) private loginManagement;
+   mapping(uint256=>lotteryThings) public lotteryMap;
+   mapping(uint256=>address payable[] ) public  s_players;
+   mapping(address=>uint256) public tokenBalance;
+   mapping(address=>login) public loginManagement;
+   mapping(uint256=>RequestStatus) public s_requests;
+   mapping(uint256=>uint256) public relationId;
     //events
     event lotteryAnnounceMent(uint256 counterNo,uint256 entranceFee,uint256 timeStamp,uint256 endTime,uint256 indexed minplayers);
-    //event enterlottery(uint256 counterNo,address participants,uint256 time);
-    //event RequestedLotteryWinner(uint256 indexed requestId,uint256 lotteryCounter);
     event winnerPicked(address indexed winner,uint256 lotteryCounter);
     event lotteryForceEnded(uint256 lotteryCounter);
-   
-    //consructor
-    constructor(){
-        i_owner=payable(msg.sender);
+    event RequestSent(uint256 requestId, uint32 numWords);
+    event RequestFulfilled(uint256 requestId, uint256[] randomWords);
+
+    struct RequestStatus {
+        bool fulfilled; // whether the request has been successfully fulfilled
+        bool exists; // whether a requestId exists
+        uint256[] randomWords;
     }
  
-         
+
+    VRFCoordinatorV2Interface COORDINATOR;
+
+    // Your subscription ID.
+    uint64 public s_subscriptionId;
+
+    // past requests Id.
+    uint256[] public requestIds;
+    uint256 public lastRequestId;
+    uint256[] public lastRandomWords;
+
+    // The gas lane to use, which specifies the maximum gas price to bump to.
+    // For a list of available gas lanes on each network,
+    // see https://docs.chain.link/docs/vrf/v2/subscription/supported-networks/#configurations
+    bytes32 keyHash =
+        0x474e34a077df58807dbe9c96d3c009b23b3c6d0cce433e59bbf5b34f823bc56c;
+    uint32 callbackGasLimit = 2500000;
+    uint16 requestConfirmations = 3;
+    uint32 numWords = 1;
+    //consructor
+   constructor(uint64 subscriptionId)
+  VRFConsumerBaseV2(0x8103B0A8A00be2DDC778e6e7eaa21791Cd364625)
+    {
+          i_owner=payable(msg.sender);
+        COORDINATOR = VRFCoordinatorV2Interface(
+            0x8103B0A8A00be2DDC778e6e7eaa21791Cd364625
+        );
+        s_subscriptionId = subscriptionId;
+   }  
+
+   //function
        function lotteryStart(uint16 _timeInterval,uint256 _entranceFee,uint256 _minplayers) public 
        {
         if(msg.sender!=i_owner)
-
         {
             revert lottery__notOwner();
         }
        lotteryMap[lotteryCounter]=lotteryThings(_entranceFee,block.timestamp,_timeInterval,lotteryState.OPEN,_minplayers);
-     
        emit lotteryAnnounceMent(lotteryCounter,_entranceFee,block.timestamp, block.timestamp+_timeInterval,_minplayers);
-
-         lotteryCounter+=1;
-
+         lotteryCounter+=1;  
        }
-    function enterLottery(uint256 _lotteryCounter) public payable {
+
+        function enterLottery(uint256 _lotteryCounter) public payable {
         if (msg.value < lotteryMap[_lotteryCounter].s_entranceFee) {
             revert lottery__NotEnoughEth();
         }
@@ -88,46 +119,69 @@ contract RandomLottery {
        }
         s_players[_lotteryCounter].push(payable(msg.sender));
         randomAddress=msg.sender;
-     
     }
-//condition checking variable
-   function checkThings(uint256 _lotteryCounter) public view returns(bool) 
-   {
+
+       function checkThings(uint256 _lotteryCounter) public  returns(uint256 requestId) 
+    {
+    require(msg.sender==i_owner,"you are not eligible");
     bool isDeadinePassed=(block.timestamp>=(lotteryMap[_lotteryCounter].s_latestTimeStamp+lotteryMap[_lotteryCounter].s_interval));
     bool isPlayerAll=(s_players[_lotteryCounter].length>=lotteryMap[_lotteryCounter].MinPlayers);
-    bool islotteryStillOn=checkLotteryStatus(_lotteryCounter);
-    bool res=(isDeadinePassed&&isPlayerAll&&islotteryStillOn);
-    return res;
+    bool isLotteryActive=(lotteryMap[lotteryCounter].s_lotteryState==lotteryState.OPEN);
+    bool res=(isDeadinePassed&&isPlayerAll&&isLotteryActive);
+    if(res){
+
+          requestId = COORDINATOR.requestRandomWords(
+            keyHash,
+            s_subscriptionId,
+            requestConfirmations,
+            callbackGasLimit,
+            numWords
+        );
+        
+        s_requests[requestId] = RequestStatus({
+            randomWords: new uint256[](0),
+            exists: true,
+            fulfilled: false
+        });
+        requestIds.push(requestId);
+        lastRequestId = requestId;
+        emit RequestSent(requestId, numWords);
+          relationId[requestId]=_lotteryCounter;
+    }
+    else{
+        return 0;
+    }
     
    }
-    //winnerPicking
+        function fulfillRandomWords(
+        uint256 _requestId,
+        uint256[] memory _randomWords
+    ) internal override {
+        require(s_requests[_requestId].exists, "request not found");
+        s_requests[_requestId].fulfilled = true;
+        s_requests[_requestId].randomWords = _randomWords;
+           lastRandomWords=_randomWords;
+           lastRequestId=_requestId;
+        uint256 _lotteryCounter=relationId[lastRequestId];
+         uint256 indexofWinner;
+         indexofWinner=lastRandomWords[0]%s_players[_lotteryCounter].length;
+         address payable s_recentWinner= payable (s_players[_lotteryCounter][indexofWinner]);
+          uint256 amount=(4*lotteryMap[_lotteryCounter].s_entranceFee)*(s_players[_lotteryCounter].length)/5;
+          lotteryMap[_lotteryCounter].s_lotteryState=lotteryState.CLOSED;
+          (bool success,)=(s_recentWinner).call{value:amount}("");
+          require(success,"failed");
 
-        function makeThingsWinner(uint256 _lotteryCounter) public  {
-           
-            require(checkThings(_lotteryCounter)==true,"you cant enter here");
-            require(msg.sender==i_owner,"owner have given privillages due to security issues");
-             uint256 indexofWinner;
-
-           if(checkThings(_lotteryCounter)){
-            indexofWinner=uint256(keccak256(abi.encodePacked(randomAddress,block.number,s_players[_lotteryCounter].length)))%(s_players[_lotteryCounter].length);  
-              
-           }
-           address payable recentWinner= payable (s_players[_lotteryCounter][indexofWinner]);
-             uint256 amount=(4*(s_players[_lotteryCounter].length)*(lotteryMap[_lotteryCounter].s_entranceFee))/5;
-              lotteryMap[_lotteryCounter].s_lotteryState=lotteryState.CLOSED;
-             (bool success, ) = recentWinner.call{value: amount}("");
-             require(success,"transaction Failed");
-            
              //token distribution
             for(uint256 i=0;i<s_players[_lotteryCounter].length;i++){
                 address participants=s_players[_lotteryCounter][i];
                 tokenBalance[participants]+=4;
 
              }
-             delete s_players[_lotteryCounter];
              lotteryCompletionOwnerTime+=1;
-             emit winnerPicked(recentWinner,_lotteryCounter);
-        }
+             emit winnerPicked(s_recentWinner, _lotteryCounter);
+             emit RequestFulfilled(_requestId, _randomWords);
+    }
+
            //token exchanging
 function exchangeTokenToeth() public returns(bool){
     if(getTokenBalance()<100){
@@ -152,7 +206,7 @@ function exchangeTokenToeth() public returns(bool){
         }
     }
     //login token distribution
-    function loginManagement1() public {
+          function loginManagement1() public {
           require(loginManagement[msg.sender].check_reset>0,"you are new bie");
           require((block.timestamp)-(loginManagement[msg.sender].s_lastTimeStamp)>=(24*3600),"not 24 hours past");
            if(block.timestamp-(loginManagement[msg.sender].s_lastTimeStamp)>(2*24*3600)){
@@ -181,9 +235,9 @@ function exchangeTokenToeth() public returns(bool){
     function ownerCashout() public {
         require(msg.sender==i_owner,"you are not eligible for commercial fund");
          require(getOverAllLotteryStatus(),"all lottery should be in closed state");
-        if(lotteryCompletionOwnerTime>10){
+        if(lotteryCompletionOwnerTime>5){
              require(address(this).balance>=0.8*1e18,"sorry you can not cash out now,low balance");
-                         lotteryCompletionOwnerTime-=10;
+                         lotteryCompletionOwnerTime-=5;
         (bool success,)= i_owner.call{value:0.8*1e18}("");
       require(success,"transaction failed");
       
@@ -192,21 +246,10 @@ function exchangeTokenToeth() public returns(bool){
             revert lottery__notEnoughLotterytime();
         }       
     }
-    //some getter
-    
-        
-    
-    function getOverAllLotteryStatus() public view returns(bool){
-        bool totalStatus=true;
-        for(uint256 i=1;i<=lotteryCounter;i++){
-            bool status=(lotteryMap[i].s_lotteryState==lotteryState.CLOSED);
-            totalStatus=totalStatus&&status;
-        }
-        return totalStatus;
-    }
     //refund function
     function getYourRefund(uint256 _lotteryCounter) public {
         uint256 lotteryEnded=lotteryMap[_lotteryCounter].s_interval+lotteryMap[_lotteryCounter].s_latestTimeStamp;
+        require(lotteryMap[_lotteryCounter].s_lotteryState==lotteryState.OPEN,"successFully completed lottery");
         require(block.timestamp-lotteryEnded>3600*24,"wait for sometime");
         bool varCheck=false;
         uint256 counter;
@@ -227,23 +270,34 @@ function exchangeTokenToeth() public returns(bool){
 
          }
     }
-    //still refund is active
-    function forceLotteryClosed(uint256 _lotteryCounter) public {
+
+     function forceLotteryClosed(uint256 _lotteryCounter) public {
 
              require(msg.sender==i_owner,"owner required for shutdown lottery");
+             require(lotteryMap[_lotteryCounter].s_lotteryState==lotteryState.OPEN,"no need to approve lottery was successful");
              uint256 lotteryEnded=lotteryMap[_lotteryCounter].s_interval+lotteryMap[_lotteryCounter].s_latestTimeStamp;
               require(block.timestamp-lotteryEnded>3600*24*2,"wait for sometime");
     lotteryMap[_lotteryCounter].s_lotteryState=lotteryState.CLOSED;
     emit lotteryForceEnded(_lotteryCounter);
-
     }
+    //some getter
+    function getOverAllLotteryStatus() public view returns(bool){
+        bool totalStatus=true;
+        for(uint256 i=1;i<lotteryCounter;i++){
+            bool status=(lotteryMap[i].s_lotteryState==lotteryState.CLOSED);
+            totalStatus=totalStatus&&status;
+        }
+        return totalStatus;
+    }
+    
+    //still refund is active
+   
    function getYourStreak() public view returns(uint256){
     return(loginManagement[msg.sender].streak);
    }      
     function getTokenBalance() public view returns(uint256){
         return (tokenBalance[msg.sender]);
     }
-   
      function minplayerRequiredToJoin(uint256 _lotteryCounter) public view returns(uint256){
         require((lotteryMap[_lotteryCounter].MinPlayers-s_players[_lotteryCounter].length)>0);
         return (lotteryMap[_lotteryCounter].MinPlayers-s_players[_lotteryCounter].length);
